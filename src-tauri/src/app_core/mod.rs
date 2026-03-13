@@ -142,8 +142,9 @@ impl AppState {
 mod tests {
     use super::AppState;
     use crate::domain::pad::{AssetId, AudioAsset, PadBank};
-    use crate::domain::project::Project;
     use crate::domain::mixer::MixerState;
+    use crate::domain::project::Project;
+    use crate::project_store;
     use hound::{SampleFormat, WavSpec, WavWriter};
     use std::fs;
     use std::path::PathBuf;
@@ -211,5 +212,52 @@ mod tests {
         assert!(!samples.is_empty());
 
         let _ = fs::remove_file(wav_path);
+    }
+
+    #[test]
+    fn saved_project_assets_round_trip_back_into_library() {
+        let wav_path = temp_wav_path();
+        write_test_wav(&wav_path);
+
+        let asset = AudioAsset {
+            id: AssetId("asset-roundtrip".to_string()),
+            name: "sting".to_string(),
+            path: wav_path.to_string_lossy().to_string(),
+            duration_secs: 0.0,
+            sample_rate: 0,
+            channels: 0,
+        };
+
+        let mut bank = PadBank::new(0, 1);
+        bank.pads[0].asset = Some(asset);
+
+        let project = Project {
+            schema_version: 1,
+            app_version: "0.1.0".to_string(),
+            name: "roundtrip".to_string(),
+            banks: vec![bank],
+            active_bank: 0,
+            mixer: MixerState::default(),
+            input_device_name: None,
+            output_device_name: None,
+            sample_rate: 48_000,
+            buffer_size: 512,
+        };
+
+        let project_path = std::env::temp_dir()
+            .join(format!("podcast-console-project-{}", SystemTime::now().duration_since(UNIX_EPOCH).expect("unix epoch").as_nanos()))
+            .join("project.json");
+
+        project_store::save_project(&project, &project_path).expect("project saved");
+        let loaded = project_store::load_project(&project_path).expect("project loaded");
+        let library = AppState::build_asset_library(&loaded);
+
+        assert!(library.contains_key("asset-roundtrip"));
+
+        let _ = fs::remove_file(wav_path);
+        let _ = fs::remove_file(&project_path);
+        if let Some(parent) = project_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
     }
 }

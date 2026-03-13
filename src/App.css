@@ -27,6 +27,19 @@ input, select { font-family: inherit; }
   border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
 
+.app-notice {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.app-notice.info { background: #1b2840; color: #d9e7ff; }
+.app-notice.success { background: #14281c; color: #c8f5d7; }
+.app-notice.error { background: #33181c; color: #ffd7dc; }
+.app-notice-close {
+  border: none; background: transparent; color: inherit; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 2px 4px;
+}
+
 .app-logo { font-size: 15px; font-weight: 700; white-space: nowrap; color: var(--accent); }
 
 .nav-tabs { display: flex; gap: 4px; }
@@ -160,8 +173,6 @@ input, select { font-family: inherit; }
 .device-field label { font-size: 11px; color: var(--text-muted); }
 .device-select { background: var(--bg-3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; color: var(--text); font-size: 13px; width: 100%; }
 .devices-actions { margin-top: 16px; }
-.devices-status { font-size: 11px; color: var(--accent); margin-top: 10px; }
-.devices-error { font-size: 11px; color: var(--red); margin-top: 10px; }
 .devices-note { font-size: 11px; color: var(--text-muted); margin-top: 8px; }
 
 .project-panel { padding: 8px; max-width: 480px; }

@@ -11,7 +11,16 @@ import { ProjectPanel } from './components/ProjectPanel';
 import './App.css';
 
 export default function App() {
-  const { loadProject, refreshLevels, refreshRecordingDuration, activePanel, setActivePanel, selectedPad } = useAppStore();
+  const {
+    loadProject,
+    refreshLevels,
+    refreshRecordingDuration,
+    activePanel,
+    setActivePanel,
+    selectedPad,
+    notice,
+    clearNotice,
+  } = useAppStore();
 
   useEffect(() => {
     loadProject();
@@ -28,6 +37,16 @@ export default function App() {
     const id = setInterval(refreshRecordingDuration, 1000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    if (!notice || notice.kind === 'error') return;
+
+    const id = setTimeout(() => {
+      clearNotice();
+    }, 3200);
+
+    return () => clearTimeout(id);
+  }, [notice, clearNotice]);
 
   return (
     <div className="app">
@@ -47,6 +66,13 @@ export default function App() {
         </nav>
         <RecordingBar />
       </header>
+
+      {notice && (
+        <div className={`app-notice ${notice.kind}`}>
+          <span>{notice.message}</span>
+          <button className="app-notice-close" onClick={clearNotice} aria-label="Dismiss notice">✕</button>
+        </div>
+      )}
 
       {/* Main content */}
       <main className="main-content">

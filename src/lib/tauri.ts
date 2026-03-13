@@ -150,8 +150,116 @@ async function openBrowserAudioFile(): Promise<string | null> {
   });
 }
 
+function extractErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+    return error.message;
+  }
+  return 'Unknown error';
+}
+
+function normalizeTauriError(command: string, error: unknown) {
+  const raw = extractErrorMessage(error);
+  const message = raw.toLowerCase();
+
+  if (command === 'import_asset') {
+    if (message.includes('cannot open') || message.includes('probe failed') || message.includes('decoder error')) {
+      return 'The selected audio file could not be opened or decoded.';
+    }
+    return 'Unable to import the selected audio file.';
+  }
+
+  if (command === 'assign_asset_to_pad') {
+    if (message.includes('asset not found')) {
+      return 'The selected audio asset is no longer available in memory.';
+    }
+    return 'Unable to assign audio to the selected pad.';
+  }
+
+  if (command === 'trigger_pad') {
+    if (message.includes('pad not ready')) {
+      return 'This pad is not ready yet. Assign audio or unmute it first.';
+    }
+    if (message.includes('asset not loaded')) {
+      return 'This pad audio is not loaded. Reopen the project or reimport the file.';
+    }
+    if (message.includes('invalid bank') || message.includes('invalid slot')) {
+      return 'The selected pad location is no longer valid.';
+    }
+    return 'Unable to trigger the selected pad.';
+  }
+
+  if (command === 'stop_pad' || command === 'stop_all_pads') {
+    return 'Unable to stop pad playback.';
+  }
+
+  if (command === 'start_recording') {
+    if (message.includes('already recording')) {
+      return 'Recording is already in progress.';
+    }
+    if (message.includes('access is denied') || message.includes('permission denied')) {
+      return 'Recording could not start because the output folder is not writable.';
+    }
+    return 'Unable to start recording.';
+  }
+
+  if (command === 'stop_recording') {
+    return 'Unable to stop recording cleanly.';
+  }
+
+  if (command === 'set_selected_devices') {
+    if (message.includes('stop recording before changing devices')) {
+      return 'Stop the active recording before changing audio devices.';
+    }
+    if (message.includes('device not found')) {
+      return 'The selected audio device is no longer available on this machine.';
+    }
+    if (message.includes('no output device')) {
+      return 'No output audio device is available.';
+    }
+    return 'Unable to apply the selected audio devices.';
+  }
+
+  if (command === 'open_project') {
+    if (message.includes('the system cannot find the file specified') || message.includes('no such file')) {
+      return 'The selected project file could not be found.';
+    }
+    return 'Unable to open the selected project.';
+  }
+
+  if (command === 'create_project') {
+    return 'Unable to create the new project.';
+  }
+
+  if (command === 'save_project') {
+    if (message.includes('access is denied') || message.includes('permission denied')) {
+      return 'The project could not be saved because the folder is not writable.';
+    }
+    return 'Unable to save the current project.';
+  }
+
+  if (command === 'set_active_bank' || command === 'switch_bank') {
+    return 'Unable to switch to the selected bank.';
+  }
+
+  if (command === 'toggle_mute_strip') {
+    return 'Unable to update the mute state for this channel.';
+  }
+
+  if (command === 'list_input_devices' || command === 'list_output_devices' || command === 'get_selected_devices') {
+    return 'Unable to query the available audio devices.';
+  }
+
+  return raw;
+}
+
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  return invoke<T>(command, args);
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    throw new Error(normalizeTauriError(command, error));
+  }
 }
 
 export const commands = {

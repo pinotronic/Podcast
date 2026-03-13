@@ -4,6 +4,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
+use rubato::{FftFixedInOut, Resampler};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -11,6 +12,8 @@ use tracing::{error, info};
 use super::mixer;
 use super::recorder::Recorder;
 use super::scheduler::{PadVoice, Scheduler};
+
+const MIC_RESAMPLER_CHUNK_SIZE: usize = 512;
 
 pub enum EngineCommand {
     TriggerPad(PadVoice),
@@ -39,6 +42,175 @@ pub struct AudioEngine {
     recorder: Arc<Mutex<Recorder>>,
     output_sample_rate: u32,
     output_channels: u16,
+}
+
+enum MicInputProcessor {
+    Passthrough {
+        input_channels: usize,
+        output_channels: usize,
+    },
+    Rubato(MicRubatoProcessor),
+}
+
+struct MicRubatoProcessor {
+    input_channels: usize,
+    output_channels: usize,
+    max_buffer_len: usize,
+    pending_input: Vec<Vec<f32>>,
+    process_buffer: Vec<Vec<f32>>,
+    output_buffer: Vec<Vec<f32>>,
+    resampler: FftFixedInOut<f32>,
+}
+
+impl MicInputProcessor {
+    fn new(
+        input_sample_rate: u32,
+        output_sample_rate: u32,
+        input_channels: usize,
+        output_channels: usize,
+    ) -> Result<Self> {
+        if input_channels == 0 || output_channels == 0 {
+            return Ok(Self::Passthrough {
+                input_channels,
+                output_channels,
+            });
+        }
+
+        if input_sample_rate == output_sample_rate {
+            return Ok(Self::Passthrough {
+                input_channels,
+                output_channels,
+            });
+        }
+
+        let resampler = FftFixedInOut::<f32>::new(
+            input_sample_rate as usize,
+            output_sample_rate as usize,
+            MIC_RESAMPLER_CHUNK_SIZE,
+            output_channels,
+        )?;
+        let max_buffer_len = output_sample_rate as usize * output_channels * 2;
+        let input_frames_max = resampler.input_frames_max();
+        let process_buffer = vec![vec![0.0; input_frames_max]; output_channels];
+        let output_buffer = resampler.output_buffer_allocate(true);
+
+        Ok(Self::Rubato(MicRubatoProcessor {
+            input_channels,
+            output_channels,
+            max_buffer_len,
+            pending_input: vec![Vec::new(); output_channels],
+            process_buffer,
+            output_buffer,
+            resampler,
+        }))
+    }
+
+    fn push_input(&mut self, input: &[f32], mic_buffer: &Arc<Mutex<VecDeque<f32>>>) {
+        match self {
+            Self::Passthrough {
+                input_channels,
+                output_channels,
+            } => Self::push_passthrough(*input_channels, *output_channels, input, mic_buffer),
+            Self::Rubato(processor) => processor.push_input(input, mic_buffer),
+        }
+    }
+
+    fn push_passthrough(
+        input_channels: usize,
+        output_channels: usize,
+        input: &[f32],
+        mic_buffer: &Arc<Mutex<VecDeque<f32>>>,
+    ) {
+        if input_channels == 0 || output_channels == 0 {
+            return;
+        }
+
+        let input_frames = input.len() / input_channels;
+        if input_frames == 0 {
+            return;
+        }
+
+        let max_buffer_len = output_channels * input_frames * 4;
+        let mut queue = mic_buffer.lock();
+        for frame in 0..input_frames {
+            for channel in 0..output_channels {
+                let src_channel = if input_channels == 1 {
+                    0
+                } else {
+                    channel.min(input_channels - 1)
+                };
+                let src_index = frame * input_channels + src_channel;
+                queue.push_back(input[src_index]);
+            }
+        }
+
+        while queue.len() > max_buffer_len {
+            queue.pop_front();
+        }
+    }
+}
+
+impl MicRubatoProcessor {
+    fn push_input(&mut self, input: &[f32], mic_buffer: &Arc<Mutex<VecDeque<f32>>>) {
+        if self.input_channels == 0 || self.output_channels == 0 {
+            return;
+        }
+
+        let input_frames = input.len() / self.input_channels;
+        if input_frames == 0 {
+            return;
+        }
+
+        for frame in 0..input_frames {
+            for channel in 0..self.output_channels {
+                let src_channel = if self.input_channels == 1 {
+                    0
+                } else {
+                    channel.min(self.input_channels - 1)
+                };
+                let src_index = frame * self.input_channels + src_channel;
+                self.pending_input[channel].push(input[src_index]);
+            }
+        }
+
+        loop {
+            let required_frames = self.resampler.input_frames_next();
+            if self.pending_input[0].len() < required_frames {
+                break;
+            }
+
+            for channel in 0..self.output_channels {
+                self.process_buffer[channel][..required_frames]
+                    .copy_from_slice(&self.pending_input[channel][..required_frames]);
+                self.pending_input[channel].drain(..required_frames);
+            }
+
+            match self
+                .resampler
+                .process_into_buffer(&self.process_buffer, &mut self.output_buffer, None)
+            {
+                Ok((_consumed, produced_frames)) => {
+                    let mut queue = mic_buffer.lock();
+                    for frame in 0..produced_frames {
+                        for channel in 0..self.output_channels {
+                            queue.push_back(self.output_buffer[channel][frame]);
+                        }
+                    }
+
+                    while queue.len() > self.max_buffer_len {
+                        queue.pop_front();
+                    }
+                }
+                Err(err) => {
+                    error!("Mic resampler failed: {}", err);
+                    for channel in &mut self.pending_input {
+                        channel.clear();
+                    }
+                    break;
+                }
+            }
+        }
+    }
 }
 
 impl AudioEngine {
@@ -76,21 +248,21 @@ impl AudioEngine {
 
         let master_gain = Arc::new(Mutex::new(1.0f32));
         let pads_gain = Arc::new(Mutex::new(1.0f32));
-    let mic_gain = Arc::new(Mutex::new(1.0f32));
+        let mic_gain = Arc::new(Mutex::new(1.0f32));
         let master_muted = Arc::new(Mutex::new(false));
         let pads_muted = Arc::new(Mutex::new(false));
-    let mic_muted = Arc::new(Mutex::new(false));
-    let mic_peak = Arc::new(Mutex::new(0.0f32));
-    let mic_buffer = Arc::new(Mutex::new(VecDeque::<f32>::new()));
+        let mic_muted = Arc::new(Mutex::new(false));
+        let mic_peak = Arc::new(Mutex::new(0.0f32));
+        let mic_buffer = Arc::new(Mutex::new(VecDeque::<f32>::new()));
 
         let master_gain_cb = master_gain.clone();
         let pads_gain_cb = pads_gain.clone();
-    let mic_gain_cb = mic_gain.clone();
+        let mic_gain_cb = mic_gain.clone();
         let master_muted_cb = master_muted.clone();
         let pads_muted_cb = pads_muted.clone();
-    let mic_muted_cb = mic_muted.clone();
-    let mic_peak_out = mic_peak.clone();
-    let mic_buffer_out = mic_buffer.clone();
+        let mic_muted_cb = mic_muted.clone();
+        let mic_peak_out = mic_peak.clone();
+        let mic_buffer_out = mic_buffer.clone();
         let scheduler_cb = scheduler.clone();
         let recorder_cb = recorder.clone();
         let recorder_thread = recorder.clone();
@@ -171,16 +343,28 @@ impl AudioEngine {
                     let output_channels_input = out_channels;
                     let mic_peak_in = mic_peak.clone();
                     let mic_buffer_in = mic_buffer.clone();
+                    let mic_processor = match MicInputProcessor::new(
+                        input_config.sample_rate().0,
+                        sample_rate,
+                        input_channels,
+                        output_channels_input,
+                    ) {
+                        Ok(processor) => Arc::new(Mutex::new(processor)),
+                        Err(err) => {
+                            error!("Failed to initialize mic resampler: {}", err);
+                            while let Ok(cmd) = cmd_rx.recv() {
+                                Self::handle_cmd(cmd, &scheduler, &recorder_thread, &master_gain, &pads_gain, &mic_gain, &master_muted, &pads_muted, &mic_muted);
+                            }
+                            return;
+                        }
+                    };
                     let build_result = match input_config.sample_format() {
                         SampleFormat::F32 => input_device.build_input_stream(
                             &ic,
                             move |data: &[f32], _| {
                                 Self::capture_input_buffer(
                                     data,
-                                    input_channels,
-                                    input_config.sample_rate().0,
-                                    output_channels_input,
-                                    sample_rate,
+                                    &mic_processor,
                                     &mic_buffer_in,
                                     &mic_peak_in,
                                 );
@@ -197,10 +381,7 @@ impl AudioEngine {
                                     .collect::<Vec<_>>();
                                 Self::capture_input_buffer(
                                     &normalized,
-                                    input_channels,
-                                    input_config.sample_rate().0,
-                                    output_channels_input,
-                                    sample_rate,
+                                    &mic_processor,
                                     &mic_buffer_in,
                                     &mic_peak_in,
                                 );
@@ -217,10 +398,7 @@ impl AudioEngine {
                                     .collect::<Vec<_>>();
                                 Self::capture_input_buffer(
                                     &normalized,
-                                    input_channels,
-                                    input_config.sample_rate().0,
-                                    output_channels_input,
-                                    sample_rate,
+                                    &mic_processor,
                                     &mic_buffer_in,
                                     &mic_peak_in,
                                 );
@@ -271,14 +449,11 @@ impl AudioEngine {
 
     fn capture_input_buffer(
         input: &[f32],
-        input_channels: usize,
-        input_sample_rate: u32,
-        output_channels: usize,
-        output_sample_rate: u32,
+        mic_processor: &Arc<Mutex<MicInputProcessor>>,
         mic_buffer: &Arc<Mutex<VecDeque<f32>>>,
         mic_peak: &Arc<Mutex<f32>>,
     ) {
-        if input.is_empty() || input_channels == 0 || output_channels == 0 {
+        if input.is_empty() {
             return;
         }
 
@@ -290,33 +465,7 @@ impl AudioEngine {
             }
         }
 
-        let input_frames = input.len() / input_channels;
-        if input_frames == 0 {
-            return;
-        }
-
-        let ratio = output_sample_rate as f64 / input_sample_rate.max(1) as f64;
-        let output_frames = ((input_frames as f64) * ratio).round().max(1.0) as usize;
-        let max_buffer_len = output_sample_rate as usize * output_channels * 2;
-
-        let mut queue = mic_buffer.lock();
-        for out_frame in 0..output_frames {
-            let src_frame = ((out_frame as f64) / ratio).floor() as usize;
-            let frame_index = src_frame.min(input_frames - 1);
-            for channel in 0..output_channels {
-                let src_channel = if input_channels == 1 {
-                    0
-                } else {
-                    channel.min(input_channels - 1)
-                };
-                let src_index = frame_index * input_channels + src_channel;
-                queue.push_back(input[src_index]);
-            }
-        }
-
-        while queue.len() > max_buffer_len {
-            queue.pop_front();
-        }
+        mic_processor.lock().push_input(input, mic_buffer);
     }
 
     fn mix_input_buffer(mic_buffer: &Arc<Mutex<VecDeque<f32>>>, output: &mut [f32], gain: f32) {
@@ -414,3 +563,25 @@ impl AudioEngine {
 // Safe because AudioEngine only holds Sender (Send) and Arc<Mutex<Receiver>> (Send+Sync)
 unsafe impl Send for AudioEngine {}
 unsafe impl Sync for AudioEngine {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mic_resampler_expands_mono_input_for_stereo_output() {
+        let mic_buffer = Arc::new(Mutex::new(VecDeque::<f32>::new()));
+        let mut processor = MicInputProcessor::new(44_100, 48_000, 1, 2).unwrap();
+
+        let input = vec![0.25f32; MIC_RESAMPLER_CHUNK_SIZE * 3];
+        processor.push_input(&input, &mic_buffer);
+
+        let queue = mic_buffer.lock();
+        assert!(!queue.is_empty());
+        assert_eq!(queue.len() % 2, 0);
+
+        let first_frame = queue.iter().take(2).copied().collect::<Vec<_>>();
+        assert_eq!(first_frame.len(), 2);
+        assert!((first_frame[0] - first_frame[1]).abs() < 1.0e-6);
+    }
+}

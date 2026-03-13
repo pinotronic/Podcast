@@ -34,29 +34,33 @@ function PadCell({ pad, isActive, isSelected, onTrigger, onRightClick }: PadCell
 }
 
 export function PadGrid() {
-  const { project, activePads, selectedPad, triggerPad, stopPad, loadProject, setSelectedPad } = useAppStore();
+  const { project, activePads, selectedPad, triggerPad, stopPad, loadProject, setSelectedPad, setNotice } = useAppStore();
 
   const handleTrigger = useCallback(
     async (bank: number, slot: number, pad: Pad) => {
-      if (!pad.asset) {
-        // No asset: open file picker
-        const path = await pickAudioFile();
-        if (!path) return;
-        const result = await commands.importAsset(path);
-        await commands.assignAssetToPad(bank, slot, result.asset_id);
-        // Update pad name to asset name
-        await commands.updatePadName(bank, slot, result.name);
-        await loadProject();
-        return;
-      }
-      const key = `${bank}-${slot}`;
-      if (activePads.has(key) && pad.playback_mode === 'Toggle') {
-        await stopPad(bank, slot);
-      } else {
-        await triggerPad(bank, slot);
+      try {
+        if (!pad.asset) {
+          const path = await pickAudioFile();
+          if (!path) return;
+          const result = await commands.importAsset(path);
+          await commands.assignAssetToPad(bank, slot, result.asset_id);
+          await commands.updatePadName(bank, slot, result.name);
+          await loadProject();
+          setNotice('success', `Asset assigned to ${result.name}.`);
+          return;
+        }
+        const key = `${bank}-${slot}`;
+        if (activePads.has(key) && pad.playback_mode === 'Toggle') {
+          await stopPad(bank, slot);
+        } else {
+          await triggerPad(bank, slot);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to use pad';
+        setNotice('error', message);
       }
     },
-    [activePads, triggerPad, stopPad, loadProject]
+    [activePads, triggerPad, stopPad, loadProject, setNotice]
   );
 
   const handleRightClick = useCallback(

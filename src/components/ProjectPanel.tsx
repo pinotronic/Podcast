@@ -3,7 +3,7 @@ import { useAppStore } from '../store';
 import { commands } from '../lib/tauri';
 
 export function ProjectPanel() {
-  const { project, loadProject, saveProject } = useAppStore();
+  const { project, loadProject, saveProject, setNotice } = useAppStore();
   const [projects, setProjects] = useState<string[]>([]);
   const [newName, setNewName] = useState('');
 
@@ -13,16 +13,28 @@ export function ProjectPanel() {
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
-    await commands.createProject(newName.trim());
-    await loadProject();
-    setNewName('');
-    const list = await commands.listProjects();
-    setProjects(list);
+    try {
+      await commands.createProject(newName.trim());
+      await loadProject();
+      setNewName('');
+      const list = await commands.listProjects();
+      setProjects(list);
+      setNotice('success', 'Project created.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to create project';
+      setNotice('error', message);
+    }
   };
 
   const handleOpen = async (name: string) => {
-    await commands.openProject(name);
-    await loadProject();
+    try {
+      await commands.openProject(name);
+      await loadProject();
+      setNotice('success', `Project ${name} loaded.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to open project';
+      setNotice('error', message);
+    }
   };
 
   return (

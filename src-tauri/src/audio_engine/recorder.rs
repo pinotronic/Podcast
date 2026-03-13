@@ -59,3 +59,48 @@ impl Recorder {
         self.writer.is_some()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Recorder;
+    use hound::WavReader;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_wav_path() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("podcast-console-recorder-{}.wav", unique))
+    }
+
+    #[test]
+    fn recorder_writes_valid_wav_file() {
+        let path = temp_wav_path();
+        let recorder = Recorder::new();
+
+        {
+            let mut recorder = recorder.lock();
+            recorder.start(path.to_str().expect("utf8 path"), 48_000, 2).expect("recording started");
+            recorder
+                .write(&[0.25, -0.25, 0.5, -0.5, 0.125, -0.125, 0.0, 0.0])
+                .expect("samples written");
+            recorder.stop().expect("recording stopped");
+        }
+
+        let reader = WavReader::open(&path).expect("wav readable");
+        let spec = reader.spec();
+        let samples = reader
+            .into_samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("samples decoded");
+
+        assert_eq!(spec.sample_rate, 48_000);
+        assert_eq!(spec.channels, 2);
+        assert_eq!(samples.len(), 8);
+
+        let _ = fs::remove_file(path);
+    }
+}

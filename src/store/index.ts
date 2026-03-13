@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import type { Project, LevelSnapshot, RecordingState } from '../types';
 import { commands } from '../lib/tauri';
 
+type NoticeKind = 'error' | 'success' | 'info';
+
 interface AppStore {
   project: Project | null;
   recordingState: RecordingState;
@@ -10,6 +12,7 @@ interface AppStore {
   activePads: Set<string>;
   selectedPad: { bank: number; slot: number } | null;
   activePanel: 'pads' | 'mixer' | 'devices' | 'project';
+  notice: { kind: NoticeKind; message: string } | null;
 
   // Actions
   loadProject: () => Promise<void>;
@@ -24,6 +27,8 @@ interface AppStore {
   setSelectedPad: (bank: number | null, slot: number | null) => void;
   setActivePanel: (panel: AppStore['activePanel']) => void;
   refreshRecordingDuration: () => Promise<void>;
+  setNotice: (kind: NoticeKind, message: string) => void;
+  clearNotice: () => void;
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -34,22 +39,39 @@ export const useAppStore = create<AppStore>((set, get) => ({
   activePads: new Set(),
   selectedPad: null,
   activePanel: 'pads',
+  notice: null,
 
   loadProject: async () => {
-    const project = await commands.getProject();
-    set({ project });
+    try {
+      const project = await commands.getProject();
+      set({ project });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to load project';
+      set({ notice: { kind: 'error', message } });
+    }
   },
 
   saveProject: async () => {
-    await commands.saveProject();
+    try {
+      await commands.saveProject();
+      set({ notice: { kind: 'success', message: 'Project saved.' } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to save project';
+      set({ notice: { kind: 'error', message } });
+    }
   },
 
   setActiveBank: async (index) => {
-    await commands.setActiveBank(index);
-    set((s) => {
-      if (!s.project) return s;
-      return { project: { ...s.project, active_bank: index } };
-    });
+    try {
+      await commands.setActiveBank(index);
+      set((s) => {
+        if (!s.project) return s;
+        return { project: { ...s.project, active_bank: index } };
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to switch bank';
+      set({ notice: { kind: 'error', message } });
+    }
   },
 
   triggerPad: async (bank, slot) => {
@@ -69,32 +91,53 @@ export const useAppStore = create<AppStore>((set, get) => ({
         });
       }, 300);
     } catch (e) {
-      console.error('trigger_pad error:', e);
+      const message = e instanceof Error ? e.message : 'Unable to trigger pad';
+      set({ notice: { kind: 'error', message } });
     }
   },
 
   stopPad: async (bank, slot) => {
-    await commands.stopPad(bank, slot);
-    set((s) => {
-      const next = new Set(s.activePads);
-      next.delete(`${bank}-${slot}`);
-      return { activePads: next };
-    });
+    try {
+      await commands.stopPad(bank, slot);
+      set((s) => {
+        const next = new Set(s.activePads);
+        next.delete(`${bank}-${slot}`);
+        return { activePads: next };
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to stop pad';
+      set({ notice: { kind: 'error', message } });
+    }
   },
 
   stopAllPads: async () => {
-    await commands.stopAllPads();
-    set({ activePads: new Set() });
+    try {
+      await commands.stopAllPads();
+      set({ activePads: new Set() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to stop all pads';
+      set({ notice: { kind: 'error', message } });
+    }
   },
 
   startRecording: async () => {
-    await commands.startRecording();
-    set({ recordingState: 'recording' });
+    try {
+      await commands.startRecording();
+      set({ recordingState: 'recording', notice: { kind: 'success', message: 'Recording started.' } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to start recording';
+      set({ notice: { kind: 'error', message } });
+    }
   },
 
   stopRecording: async () => {
-    await commands.stopRecording();
-    set({ recordingState: 'idle', recordingDuration: 0 });
+    try {
+      await commands.stopRecording();
+      set({ recordingState: 'idle', recordingDuration: 0, notice: { kind: 'success', message: 'Recording stopped.' } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to stop recording';
+      set({ notice: { kind: 'error', message } });
+    }
   },
 
   refreshLevels: async () => {
@@ -122,4 +165,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   setActivePanel: (panel) => set({ activePanel: panel }),
+  setNotice: (kind, message) => set({ notice: { kind, message } }),
+  clearNotice: () => set({ notice: null }),
 }));

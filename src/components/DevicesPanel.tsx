@@ -1,31 +1,42 @@
 import { useState, useEffect } from 'react';
 import { commands } from '../lib/tauri';
+import { useAppStore } from '../store';
 
 export function DevicesPanel() {
+  const { setNotice } = useAppStore();
   const [inputs, setInputs] = useState<string[]>([]);
   const [outputs, setOutputs] = useState<string[]>([]);
   const [selected, setSelected] = useState<{ input: string | null; output: string | null }>({ input: null, output: null });
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState(false);
 
   useEffect(() => {
-    commands.listInputDevices().then(setInputs);
-    commands.listOutputDevices().then(setOutputs);
-    commands.getSelectedDevices().then((d) => setSelected({ input: d.input, output: d.output }));
-  }, []);
+    const loadDevices = async () => {
+      try {
+        const [availableInputs, availableOutputs, currentSelection] = await Promise.all([
+          commands.listInputDevices(),
+          commands.listOutputDevices(),
+          commands.getSelectedDevices(),
+        ]);
+        setInputs(availableInputs);
+        setOutputs(availableOutputs);
+        setSelected({ input: currentSelection.input, output: currentSelection.output });
+      } catch (err) {
+        setNotice('error', err instanceof Error ? err.message : 'Unable to query the available audio devices.');
+      }
+    };
+
+    loadDevices();
+  }, [setNotice]);
 
   const applySelection = async () => {
     setIsApplying(true);
-    setStatus(null);
-    setError(null);
 
     try {
       const applied = await commands.setSelectedDevices(selected.input, selected.output);
       setSelected(applied);
-      setStatus('Devices updated. The audio engine was reloaded.');
+      setNotice('success', 'Devices updated. The audio engine was reloaded.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to update devices');
+      setNotice('error', err instanceof Error ? err.message : 'Unable to update devices');
     } finally {
       setIsApplying(false);
     }
@@ -57,8 +68,6 @@ export function DevicesPanel() {
         </button>
       </div>
 
-      {status && <p className="devices-status">{status}</p>}
-      {error && <p className="devices-error">{error}</p>}
       <p className="devices-note">Changing devices while recording is blocked to avoid corrupting the active session.</p>
     </div>
   );
